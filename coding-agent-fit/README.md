@@ -45,7 +45,7 @@ python3 scripts/probe.py <docs-url>
 - 响应头里的 `Link: rel="llms-txt"`、`X-Llms-Txt`
 - TLS 默认严格校验，证书异常会标记 `tls_insecure: true`
 
-脚本输出包含 `summary` 字段——按 rubric 维度预消化的证据视图，评分时优先参考 summary，需要细节时回 `probes` 看 attempts。
+脚本输出包含 `summary` 字段——按 rubric 维度预消化的证据视图，评分时优先参考 summary。stdout 保持精简（无内容预览），每次尝试的完整明细写入临时 JSON 文件，路径在输出的 `probes_file` 字段里。探测被拦（403 等）和真 404 在 summary 里分开标记，SPA 壳页面会被识别并声明。
 
 如果脚本漏了什么，手动补一轮站内搜索。
 

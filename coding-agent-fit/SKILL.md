@@ -50,14 +50,17 @@ llms.txt 顶部、docs 入口、站点导航如有 "AI Agent" / "LLM" / "agentic
 python3 <skill-path>/scripts/probe.py <docs-url>
 ```
 
-脚本输出结构：
+脚本输出结构（stdout）：
 
 ```
-{ input_url, base_url, summary, probes }
+{ input_url, base_url, probes_file, note, summary, probes }
 ```
 
-`summary` 是按 rubric 维度预消化的证据视图，包含 7 个 section：
+stdout 里的 `probes` 是瘦身版：没有 content_preview，尝试记录折叠成 `tried` 统计（次数 + 状态码分布）。每次尝试的完整明细（URL、状态、内容预览）写在 `probes_file` 指向的 JSON 文件里，需要时用 Read 读局部。
 
+`summary` 是按 rubric 维度预消化的证据视图，包含 8 个 section：
+
+- `coverage`：输入页渲染状态（static_ok / likely_spa_shell / blocked / unreachable）+ 探测覆盖统计
 - `ai_discovery`：llms.txt / llms-full / 信号命中 / link header / AI Agent 章节
 - `api_spec`：OpenAPI / API Catalog / GraphQL
 - `agent_tools`：MCP / Skills / 页面提及 CLI / MCP / Skill
@@ -66,7 +69,13 @@ python3 <skill-path>/scripts/probe.py <docs-url>
 - `friction_signals`：TLS / robots / errors / rate limit / sandbox 等
 - `maintenance_hints`：changelog / status page
 
-评分时优先参考 `summary`，需要细节时回 `probes` 看具体 `attempts`。
+评分时优先参考 `summary`。以下三种情况**必须**回读 `probes_file`（硬触发，不是"需要时"）：
+
+1. 任何资源 `exists: false` 且 `blocked_suspected: true` 或 `tried.statuses` 含非 404 状态码 → 读对应 attempts 确认是"探测被拦"还是"不存在"。被拦的报告里写"探测被拦（403）"，不写"未发现"。
+2. `summary.coverage.page_rendering` 为 `likely_spa_shell` / `blocked` / `unreachable` → 所有 `page_mentions_*` 信号不可信，必须用 fetch / 站内搜索重建证据，相关维度 covered_ratio 相应下调。
+3. 判定 llms.txt 缺失前 → 核对其 `tried` 是否覆盖了根路径、挂载路径和子域。
+
+**`page_mentions_*` 是弱信号**：单页关键词命中，证据等级相当于 T3，只能当"值得去 fetch 验证"的线索，不能直接当评分证据。
 
 **步骤 3：优先读取一手机器可读资料**
 

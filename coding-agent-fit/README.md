@@ -10,21 +10,23 @@
 
 扔一个文档 URL 进去，出来的是一份中文评测报告。不用看几十页文档自己判断，工具帮你跑探测、读结构、给分数。
 
-## 📊 评分维度
+## 📊 评分体系：基线 + Agent 双轨
 
-权重按站点类型分套，下面是云服务 / API 平台的默认：
+**基线轨（60 分，扣分制）**：文档公开、API ref、鉴权、quickstart、错误码、SDK、无销售墙、changelog 等 13 项标配清单，每项三档判定（完整 0 / 部分 half / 缺失 full），从 60 往下扣。标配做到位不加分，缺失才扣。
+
+**Agent 轨（40 分，R 加分制）**：只计 Agent 增量项，权重按站点类型分套（下面是云服务默认）：
 
 | # | 维度 | 权重 | 关注点 |
 |---|------|------|--------|
-| 1 | 服务入口与发现 | 10% | Agent 能不能自己找到入口——llms.txt、sitemap、文档首页、搜索引擎可见性 |
-| 2 | 接入文档质量 | 30% | quickstart 能不能用、API ref/OpenAPI/GraphQL 全不全、鉴权写得清不清楚、AI Agent 章节有没有 |
-| 3 | Agent 辅助工具 | 25% | CLI（含 doctor / JSON 输出）、MCP server、Skill 包、AGENTS.md、各 runtime 配置示例 |
-| 4 | 接入阻碍与风险 | 25% | 登录墙、MFA、销售开通、域名验证、反爬、示例过期、错误可诊断程度、TLS |
-| 5 | 维护与反馈机制 | 10% | changelog、status page、弃用策略、文档反馈渠道 |
+| A1 | Agent 入口与发现 | 15% | llms.txt、Link header 声明、well-known 发现文件、robots 对 AI bot 友好 |
+| A2 | 文档直接可读 | 30% | `.md` 全站可用、OpenAPI 直接可下载、llms 子索引深度、AI Agent 专属章节、URL 可预测 |
+| A3 | Agent 工具 | 30% | CLI agent 化（--json / doctor / dry-run）、MCP、Skill、IDE 配置示例 |
+| A4 | Agent 专属摩擦 | 15% | 软 404、SPA 壳、反爬拦 AI bot——主要影响 Agent、对人影响很小的摩擦 |
+| A5 | 维护信号可跟踪 | 10% | changelog 有 `.md`/RSS 版本、弃用信息程序可查、反馈渠道 Agent 能用 |
 
-开发者工具 / Agent 工具 / 文档型站点用各自权重表，详见 [references/rubric.md](references/rubric.md)。
+**耦合规则**：Agent 实得分 = min(Agent 得分, 基线得分 × 2/3)——基础文档不达标时，辅助工具的加分同步受限。
 
-每个维度算 **证据比 R + 定性档 1-5 + 置信度** 三个值。贡献 = R × 权重 × 100，总分按贡献相加。置信度独立标记证据强度，不进总分但影响 "Agent 接入把握" 定性结论。
+等级这样读：D / F 表示基础文档有缺失项，C 表示基础完整但缺少 Agent 投入，B 及以上比的是 Agent 轨得分。横向比较服务时看 Agent 得分，比总分信息量大。完整标准见 [references/rubric.md](references/rubric.md)。
 
 ## 🔍 评测流程
 
@@ -45,7 +47,7 @@ python3 scripts/probe.py <docs-url>
 - 响应头里的 `Link: rel="llms-txt"`、`X-Llms-Txt`
 - TLS 默认严格校验，证书异常会标记 `tls_insecure: true`
 
-脚本输出包含 `summary` 字段——按 rubric 维度预消化的证据视图，评分时优先参考 summary，需要细节时回 `probes` 看 attempts。
+脚本输出包含 `summary` 字段——按 rubric 维度整理好的证据概览，评分时优先参考 summary。stdout 保持精简（无内容预览），每次尝试的完整明细写入临时 JSON 文件，路径在输出的 `probes_file` 字段里。探测被拦（403 等）和真 404 在 summary 里分开标记，SPA 壳页面会被识别并标记。
 
 如果脚本漏了什么，手动补一轮站内搜索。
 
@@ -53,13 +55,13 @@ python3 scripts/probe.py <docs-url>
 
 **4. 评分** —— 读 `references/rubric.md`，按维度打分，写清楚判断理由。
 
-**4.5 真实接入流程实跑** —— 选一条接入路径（REST / SDK / CLI / MCP / dashboard，看用户需求和站点强项）真的跑一遍，记录每一步通过 / 卡住 / 跳过。卡点直接回写到维度 2、3、4 的证据里。会发邮件 / 下单 / 部署的步骤必须用户明确同意，优先 sandbox / test 域。
+**4.5 真实接入流程实跑** —— 选一条接入路径（REST / SDK / CLI / MCP / dashboard，看用户需求和站点强项）真的跑一遍，记录每一步通过 / 卡住 / 跳过。人机通用卡点回写基线清单，Agent 专属卡点回写 A4 摩擦项。会发邮件 / 下单 / 部署的步骤必须用户明确同意，优先 sandbox / test 域。
 
 **5. 改进建议** —— 每条建议包含：我们看到的（事实 + 影响）、改进方向（站点可以做什么 + 衡量标准）、优先级、工作量、预期提分（R 变化具体到小数）。低置信度维度的建议优先排前。
 
 ## 📋 报告里有什么
 
-- 总分 + 等级
+- 双分数：基线 x/60 + Agent y/40，加总分和等级
 - Agent 接入把握（高 / 中 / 低）—— 这个结论直接告诉开发者能不能放心把接入任务交给 Agent
 - 需要人工介入的关键点
 - 完整接入路径（从发现入口到跑通第一个调用）

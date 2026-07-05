@@ -24,7 +24,7 @@ argument-hint: <docs-url>
 确认四件事再开始：
 
 1. 目标网站提供什么服务。
-2. 目标属于哪类：云服务 / API 平台、开发者工具、Agent 工具、文档型站点，或混合型。
+2. 目标属于哪类：云服务 / API 平台、开发者工具、Agent 工具，或混合型。纯文档站点（没有可接入的 API 或工具）不在评测范围——识别到时告知用户，确认是否改评文档背后的实际服务。
 3. 开发者希望 Coding Agent 完成什么接入任务（用户明示了就用那个；没明示就按站点类型推一个典型任务并确认）。
 4. Agent 从发现入口到跑通第一个调用，中间最可能卡在哪。
 
@@ -34,7 +34,7 @@ argument-hint: <docs-url>
 
 **步骤 0：先扫 AI Agent 专属章节**
 
-llms.txt 顶部、docs 入口、站点导航如有 "AI Agent" / "LLM" / "agentic" / "AI coding tools" 章节，先读这段——这是站点为 Agent 接入预先写的指引，能避免后续很多不必要的试错，本身是评分加分项（维度 2 +2）。
+llms.txt 顶部、docs 入口、站点导航如有 "AI Agent" / "LLM" / "agentic" / "AI coding tools" 章节，先读这段——这是站点为 Agent 接入预先写的指引，能避免后续很多不必要的试错，本身是 Agent 轨 A2 的证据项（3 分）。
 
 **步骤 1：解析输入 URL**
 
@@ -50,14 +50,17 @@ llms.txt 顶部、docs 入口、站点导航如有 "AI Agent" / "LLM" / "agentic
 python3 <skill-path>/scripts/probe.py <docs-url>
 ```
 
-脚本输出结构：
+脚本输出结构（stdout）：
 
 ```
-{ input_url, base_url, summary, probes }
+{ input_url, base_url, probes_file, note, summary, probes }
 ```
 
-`summary` 是按 rubric 维度预消化的证据视图，包含 7 个 section：
+stdout 里的 `probes` 是瘦身版：没有 content_preview，尝试记录折叠成 `tried` 统计（次数 + 状态码分布）。每次尝试的完整明细（URL、状态、内容预览）写在 `probes_file` 指向的 JSON 文件里，需要时用 Read 读局部。
 
+`summary` 是按 rubric 维度整理好的证据概览，包含 8 个 section：
+
+- `coverage`：输入页渲染状态（static_ok / likely_spa_shell / blocked / unreachable）+ 探测覆盖统计
 - `ai_discovery`：llms.txt / llms-full / 信号命中 / link header / AI Agent 章节
 - `api_spec`：OpenAPI / API Catalog / GraphQL
 - `agent_tools`：MCP / Skills / 页面提及 CLI / MCP / Skill
@@ -66,9 +69,15 @@ python3 <skill-path>/scripts/probe.py <docs-url>
 - `friction_signals`：TLS / robots / errors / rate limit / sandbox 等
 - `maintenance_hints`：changelog / status page
 
-评分时优先参考 `summary`，需要细节时回 `probes` 看具体 `attempts`。
+评分时优先参考 `summary`。以下三种情况**必须**回读 `probes_file`（硬触发，不是"需要时"）：
 
-**步骤 3：优先读取一手机器可读资料**
+1. 任何资源 `exists: false` 且 `blocked_suspected: true` 或 `tried.statuses` 含非 404 状态码 → 读对应 attempts 确认是"探测被拦"还是"不存在"。被拦的报告里写"探测被拦（403）"，不写"未发现"。
+2. `summary.coverage.page_rendering` 为 `likely_spa_shell` / `blocked` / `unreachable` → 所有 `page_mentions_*` 信号不可信，必须用 fetch / 站内搜索重建证据，相关维度 covered_ratio 相应下调。
+3. 判定 llms.txt 缺失前 → 核对其 `tried` 是否覆盖了根路径、挂载路径和子域。
+
+**`page_mentions_*` 是弱信号**：单页关键词命中，证据等级相当于 T3，只能当"值得去 fetch 验证"的线索，不能直接当评分证据。
+
+**步骤 3：优先读取机器可读的一手资料**
 
 按这个顺序：
 
@@ -145,22 +154,28 @@ python3 <skill-path>/scripts/probe.py <docs-url>
 - [ ] 文档反馈 / support / issues:
 ```
 
-每条记 URL，标证据来源等级（T1 / T2 / T3，定义见 [references/rubric.md](references/rubric.md) 置信度评级段）。
+每条记 URL，标证据来源等级（T1 / T2 / T3，定义见 [references/rubric.md](references/rubric.md) 置信度评级段）。评分时这些证据分流到两轨：共识标配项进基线清单（B1-B13），Agent 增量项进 Agent 轨（A1-A5），分类标准见 rubric.md。
 
 ### 阶段 4：评分
 
-读取 [references/rubric.md](references/rubric.md)，按 5 个维度评分。每个维度算证据比 `R`、定性档 1-5、置信度三个值。
+读取 [references/rubric.md](references/rubric.md)，按双轨计分：基线轨（60 分扣分制）+ Agent 轨（40 分 R 加分制）。
 
 **关键步骤**
 
-1. 先按站点类型选权重表（云服务 / 开发者工具 / Agent 工具 / 文档型）。
-2. 各维度算 `R`、映射档次、机械算置信度。
-3. 应用硬规则：先算原始贡献 `R * 权重 * 100`，触发硬规则时取 min。
-4. 总分 = Σ 贡献；总置信度 = worst-of。
+1. 按站点类型确定基线清单适用项和 Agent 轨权重表（云服务 / 开发者工具 / Agent 工具）。
+2. 基线清单逐项三档判定（完整 0 / 部分 half / 缺失 full），算基线得分 = 60 × (1 − Σ实际扣分/Σ适用满扣)。每项判定必须有 URL 证据；未验证到的项单列，不扣分但压低置信度。
+3. Agent 轨五个维度（A1-A5）各算 `R`、映射档次、机械算置信度。A4 为扣分制摩擦维度。
+4. Agent 得分 = Σ (R × 权重) × 40；应用耦合规则 Agent 实得分 = min(Agent 得分, 基线得分 × 2/3)。
+5. 总分 = 基线得分 + Agent 实得分；总置信度 = worst-of(A1-A5)。
 
 **自洽校验**
 
-打完分回头看：总分定的等级、Agent 接入把握定性结论、总置信度三者是否一致。冲突就回到证据复核。例如：总分 75（A 级）配 Agent 接入把握"低" → 触发自检；80 分配总置信度"低" → 报告里强调"高分但证据弱"。
+打完分回头看四组一致性：
+
+1. 总分定的等级、Agent 接入把握、总置信度三者是否冲突（如 85 分配把握"低" → 回到证据复核）。
+2. 等级语义是否成立：等级为 D / F 时，必须能指出具体的基线缺失项；等级为 C 及以上时，与相邻等级的差距必须能用 Agent 轨证据解释。
+3. **改进建议与 R 值对账**：写了预期提分的建议必须对应基线缺失项或某维度的非满分 R——声称能提分而对应 R = 1.00，两者必有一个错。满分维度上的建议允许存在，但必须标注"锦上添花，不影响当前得分"，不写预期提分。
+4. 报告头、评分概览表、耦合检查行的数字互相一致（含四舍五入后）。
 
 **评测者偏见控制**
 
@@ -178,7 +193,7 @@ python3 <skill-path>/scripts/probe.py <docs-url>
 
 ### 阶段 4.5：真实接入流程实跑（默认开启）
 
-静态评分覆盖"Agent 能不能找到 / 看懂"，但"能不能跑通"要真跑。卡点回写到维度 2、3、4，定性结论 "Agent 接入把握" 必须基于这段证据。
+静态评分覆盖"Agent 能不能找到 / 看懂"，但"能不能跑通"要真跑。卡点回写到基线清单（人机通用卡点）和 Agent 轨 A2/A3/A4（Agent 专属卡点），定性结论 "Agent 接入把握" 必须基于这段证据。
 
 **步骤 1：确认接入需求**
 
@@ -217,9 +232,9 @@ python3 <skill-path>/scripts/probe.py <docs-url>
 
 会发邮件 / 发短信 / 下单 / 推送 / 部署 / 写数据的步骤，跑之前必须用户明确同意，尽量用 sandbox / test 收件人 / 临时 project。用户拒绝就降级 dry-run（写出代码不执行），仍计入证据。不创建付费资源，不持久写入用户数据，不把 key 落到 history / logs。
 
-**步骤 6：卡点映射回维度 4**
+**步骤 6：卡点映射**
 
-每个实跑卡点必须先映射到 [rubric.md](references/rubric.md) 维度 4 的具体扣分项；映射不上 = 报告里提议新扣分项作为评测产出。
+每个实跑卡点必须先映射到 [rubric.md](references/rubric.md) 的具体计分项：人机通用卡点（key 难拿、示例跑不通、文档找不到）→ 基线清单对应项；Agent 专属卡点（软 404、SPA、llms.txt / `.md` 等资源失效）→ A4 摩擦项。两边都映射不上 = 报告里提议新扣分项作为评测产出。
 
 实跑覆盖到的维度，置信度的 `dry_run_verified` 设为 true。
 
@@ -230,11 +245,11 @@ python3 <skill-path>/scripts/probe.py <docs-url>
 - **我们看到的：** 客观事实——站点现状和对 Agent 接入的实际影响。
 - **改进方向：** 站点可以做什么、做完后的衡量标准。
 
-附带元信息：优先级（P0/P1/P2）、工作量（S/M/L）、预期提分（要具体——"维度 2 +0.15 R，约 +4.5 总分"）。
+附带元信息：优先级（P0/P1/P2）、工作量（S/M/L）、预期提分（要具体——"基线 B4 部分→完整，+3 分"或"A2 +0.15 R ≈ +1.8 总分"）。
 
 主语用站点或第三人称，评测方用"我们"，不预设读者身份（不用"你"），不用"给 Coding Agent 的修复提示"——读者是使用本 skill 做评测的用户，他们拿改进建议去推动站点改进或评估接入风险。
 
-**低置信度维度的改进建议优先级前置**：如果某维度证据偏弱（covered_ratio < 0.4），即使分数中等也要把"补可机读文档 / Agent 友好资源"作为 P0 建议，理由是"既能提分又能让评测更稳"。
+**低置信度维度的改进建议优先级前置**：如果某维度证据偏弱（covered_ratio < 0.4），即使分数中等也要把"补 `.md` / llms.txt 这类文档资源"作为 P0 建议，理由是"既能提分又能让评测更稳"。
 
 ## 报告模板
 

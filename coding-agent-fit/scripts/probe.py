@@ -6,14 +6,18 @@ Probe a documentation site for AI-readable indexes, API specs, MCP/agent
 discovery files, Markdown access, and page/index signals.
 
 Usage: python3 probe.py <docs-url>
-Output: JSON to stdout — { input_url, base_url, summary, probes }
+Output: JSON to stdout — { input_url, base_url, probes_file, note, summary, probes }
+  stdout probes are slimmed (no content_preview, attempts collapsed to stats);
+  full attempt details are written to the probes_file JSON on disk.
 """
 
 import json
+import os
 import re
 import socket
 import ssl
 import sys
+import tempfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from html.parser import HTMLParser
 from urllib.error import HTTPError, URLError
@@ -438,17 +442,17 @@ def extract_llms_signals(llms_result: dict) -> dict:
             text = fetched["text"]
 
     patterns = {
-        "mcp": r"mcp|model context protocol",
+        "mcp": r"\bmcp\b|model context protocol",
         "cli": r"\bcli\b|command line|命令行",
-        "ai_coding": r"claude code|cursor|codex|cline|opencode|roo code|ai 编程|agent|agentic",
+        "ai_coding": r"claude code|cursor|codex|cline|opencode|roo code|ai 编程|coding agents?|\bagentic\b",
         "openapi": r"openapi|swagger|api spec",
         "sdk": r"\bsdk\b|sdks?/",
-        "skill": r"\bskill\b|agent skill|agents\.md|\.cursor/rules|prompt pack|rules",
-        "auth": r"auth|oauth|api key|token|鉴权|认证|权限",
+        "skill": r"\bskills?\b|agent skill|agents\.md|\.cursor/rules|prompt pack",
+        "auth": r"authenticat|authoriz|\boauth\b|api[ -]?keys?\b|\btokens?\b|鉴权|认证|权限",
         "rate_limit": r"rate limit|quota|retry|限流|额度|重试",
-        "errors": r"error code|status code|troubleshoot|错误码|状态码|排障",
+        "errors": r"error codes?|status codes?|troubleshoot|错误码|状态码|排障",
         "changelog": r"changelog|release notes|deprecat|migration|变更|弃用|迁移",
-        "ai_section": r"ai agent|llm|agentic|ai integration|ai coding|agent integration",
+        "ai_section": r"\bai agents?\b|\bllms?\b|\bagentic\b|ai integration|ai coding|agent integration",
     }
     links = re.findall(r"- \[([^\]]+)\]\(([^)]+)\)(?::\s*([^\n]+))?", text)
     signal_links = {}
@@ -463,6 +467,31 @@ def extract_llms_signals(llms_result: dict) -> dict:
     return signal_links
 
 
+CHALLENGE_MARKERS = ("just a moment", "cf-chl", "captcha", "attention required", "access denied")
+
+
+def classify_rendering(result: dict) -> str:
+    """Classify how trustworthy page-content signals are for this fetch.
+
+    blocked / unreachable / likely_spa_shell mean the keyword signals below
+    are unreliable and the scoring agent must rebuild evidence via fetch/search.
+    """
+    status = result.get("status")
+    text = result.get("text", "")
+    if status is None:
+        return "unreachable"
+    if status in (401, 403, 429) or any(m in text[:20_000].lower() for m in CHALLENGE_MARKERS):
+        return "blocked"
+    if "text/html" in (result.get("content_type") or "").lower():
+        visible = re.sub(r"(?is)<(script|style)\b.*?</\1>", " ", text)
+        visible = re.sub(r"<[^>]+>", " ", visible)
+        visible_len = len(re.sub(r"\s+", " ", visible).strip())
+        script_count = len(re.findall(r"(?i)<script\b", text))
+        if visible_len < 800 and script_count >= 3:
+            return "likely_spa_shell"
+    return "static_ok"
+
+
 def extract_page_signals(input_url: str) -> dict:
     result = fetch(input_url, max_content=250_000)
     text = result.get("text", "")
@@ -470,17 +499,17 @@ def extract_page_signals(input_url: str) -> dict:
         "developer_entry": r"developer|docs|documentation|api reference|开发者|文档|接口",
         "quickstart": r"quickstart|get started|getting started|快速开始|入门",
         "cli": r"\bcli\b|command line|命令行|npm install|brew install|pip install",
-        "mcp": r"mcp|model context protocol",
-        "skill": r"\bskill\b|agent skill|agents\.md|\.cursor/rules|prompt pack|rules",
+        "mcp": r"\bmcp\b|model context protocol",
+        "skill": r"\bskills?\b|agent skill|agents\.md|\.cursor/rules|prompt pack",
         "agent_tools": r"claude code|cursor|codex|cline|windsurf|copilot|vs code",
         "openapi": r"openapi|swagger|api catalog|graphql schema",
-        "auth": r"auth|oauth|api key|token|鉴权|认证|权限",
+        "auth": r"authenticat|authoriz|\boauth\b|api[ -]?keys?\b|\btokens?\b|鉴权|认证|权限",
         "rate_limit": r"rate limit|quota|retry|限流|额度|重试",
-        "errors": r"error code|status code|troubleshoot|错误码|状态码|排障",
+        "errors": r"error codes?|status codes?|troubleshoot|错误码|状态码|排障",
         "status": r"status page|system status|service status|状态页|服务状态",
         "changelog": r"changelog|release notes|deprecat|migration|变更|弃用|迁移",
         "pricing_limits": r"pricing|billing|quota|region|plan|计费|套餐|地区",
-        "ai_section": r"ai agent|for llms?|agentic|ai integration|ai coding tools",
+        "ai_section": r"\bai agents?\b|for llms?|\bagentic\b|ai integration|ai coding tools",
         "sandbox": r"sandbox|test mode|test api key|playground|demo key|onboarding domain",
     }
     signals = {}
@@ -493,6 +522,7 @@ def extract_page_signals(input_url: str) -> dict:
         "status": result.get("status"),
         "content_type": result.get("content_type"),
         "tls_insecure": result.get("tls_insecure", False),
+        "rendering": classify_rendering(result),
         "signals": signals,
     }
 
@@ -525,15 +555,34 @@ def normalize_input(raw_url: str) -> str:
     return f"https://{raw_url}"
 
 
+BLOCKED_STATUSES = {401, 403, 429}
+
+
+def _attempts_stats(attempts: list[dict]) -> dict:
+    statuses: dict[str, int] = {}
+    for attempt in attempts:
+        key = str(attempt.get("status"))
+        statuses[key] = statuses.get(key, 0) + 1
+    return {"count": len(attempts), "statuses": statuses}
+
+
 def _resource_summary(probe_result: dict | None) -> dict:
-    if not probe_result or not probe_result.get("exists"):
-        return {"exists": False}
+    if not probe_result:
+        return {"exists": False, "tried": {"count": 0, "statuses": {}}}
+    if probe_result.get("exists"):
+        return {
+            "exists": True,
+            "url": probe_result.get("url"),
+            "source": probe_result.get("source"),
+            "tls_insecure": probe_result.get("tls_insecure", False),
+            "size_bytes": len(probe_result.get("content_preview") or ""),
+        }
+    attempts = probe_result.get("attempts", [])
     return {
-        "exists": True,
-        "url": probe_result.get("url"),
-        "source": probe_result.get("source"),
-        "tls_insecure": probe_result.get("tls_insecure", False),
-        "size_bytes": len(probe_result.get("content_preview") or ""),
+        "exists": False,
+        "last_status": probe_result.get("status"),
+        "tried": _attempts_stats(attempts),
+        "blocked_suspected": any(a.get("status") in BLOCKED_STATUSES for a in attempts),
     }
 
 
@@ -548,7 +597,13 @@ def build_summary(probes: dict) -> dict:
     aligned with rubric naming contract — see references/rubric.md and SKILL.md.
     """
     llms_signals = probes.get("llms_index_signals", {})
+    page = probes.get("page_signals", {})
     return {
+        "coverage": {
+            "page_rendering": page.get("rendering", "unknown"),
+            "input_status": page.get("status"),
+            "bases_probed": len(probes.get("candidate_bases", [])),
+        },
         "ai_discovery": {
             "llms_txt": _resource_summary(probes.get("llms_txt")),
             "llms_signals_hit": [
@@ -600,6 +655,25 @@ def build_summary(probes: dict) -> dict:
     }
 
 
+def slim_probes(probes: dict) -> dict:
+    """stdout-friendly view: drop content previews, collapse attempts to stats."""
+    slim = {}
+    for key, value in probes.items():
+        if key == "llms_index_signals":
+            slim[key] = {
+                k: {"count": v.get("count", 0), "sample": v.get("sample", [])[:5]}
+                for k, v in value.items()
+            }
+            continue
+        if isinstance(value, dict) and "exists" in value:
+            entry = {k: v for k, v in value.items() if k not in ("content_preview", "attempts")}
+            entry["tried"] = _attempts_stats(value.get("attempts", []))
+            slim[key] = entry
+            continue
+        slim[key] = value
+    return slim
+
+
 def main():
     if len(sys.argv) < 2:
         print(json.dumps({"error": "Usage: python3 probe.py <docs-url>"}))
@@ -630,13 +704,30 @@ def main():
     probes["page_signals"] = extract_page_signals(input_url)
     probes["robots_signals"] = extract_robots_signals(probes.get("robots_txt", {}))
 
-    output = {
+    summary = build_summary(probes)
+    full_output = {
         "input_url": input_url,
         "base_url": origin,
-        "summary": build_summary(probes),
+        "summary": summary,
         "probes": probes,
     }
-    print(json.dumps(output, ensure_ascii=False, indent=2))
+    fd, probes_file = tempfile.mkstemp(prefix="agent-fit-probe-", suffix=".json")
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        json.dump(full_output, handle, ensure_ascii=False, indent=2)
+
+    print(json.dumps({
+        "input_url": input_url,
+        "base_url": origin,
+        "probes_file": probes_file,
+        "note": (
+            "probes below is slimmed: no content_preview, attempts collapsed to tried stats. "
+            "Full per-attempt details live in probes_file. Before reporting any resource as "
+            "not found, read probes_file if exists=false with blocked_suspected=true or "
+            "non-404 codes in tried.statuses."
+        ),
+        "summary": summary,
+        "probes": slim_probes(probes),
+    }, ensure_ascii=False, indent=2))
 
 
 if __name__ == "__main__":

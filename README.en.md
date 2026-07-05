@@ -56,7 +56,7 @@ Instead of letting the agent try and fail, run an assessment first:
 
 - 🔍 **Probe** → auto-scans for llms.txt, OpenAPI, MCP, CLI, SDK, and other agent-friendly entry points
 - 🏃 **Dry-run** → picks an integration path and walks through it step by step
-- 📊 **Report** → scores 5 dimensions, shows what's strong, what's blocking, and what to fix first
+- 📊 **Report** → dual score: 60-pt baseline (table-stakes docs) + 40-pt agent-friendliness bonus — see at a glance whether the gap is fundamentals or agent investment
 
 Coding agent users can run it as a pre-integration assessment; product and service providers can use it to self-check their agent-friendliness. Weights vary by site type.
 
